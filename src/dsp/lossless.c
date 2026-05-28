@@ -634,6 +634,7 @@ extern void VP8LDspInitAVX2(void);
 extern void VP8LDspInitNEON(void);
 extern void VP8LDspInitMIPSdspR2(void);
 extern void VP8LDspInitMSA(void);
+extern void VP8LDspInitVSX(void);
 
 #define COPY_PREDICTOR_ARRAY(IN, OUT)                       \
   do {                                                      \
@@ -701,6 +702,11 @@ WEBP_DSP_INIT_FUNC(VP8LDspInit) {
 #if defined(WEBP_USE_MSA)
     if (VP8GetCPUInfo(kMSA)) {
       VP8LDspInitMSA();
+    }
+#endif
+#if defined(WEBP_HAVE_VSX)
+    if (VP8GetCPUInfo(kVSX)) {
+      VP8LDspInitVSX();
     }
 #endif
   }
