@@ -681,6 +681,7 @@ extern void VP8LEncDspInitNEON(void);
 extern void VP8LEncDspInitMIPS32(void);
 extern void VP8LEncDspInitMIPSdspR2(void);
 extern void VP8LEncDspInitMSA(void);
+extern void VP8LEncDspInitVSX(void);
 
 WEBP_DSP_INIT_FUNC(VP8LEncDspInit) {
   VP8LDspInit();
@@ -774,6 +775,11 @@ WEBP_DSP_INIT_FUNC(VP8LEncDspInit) {
 #if defined(WEBP_USE_MSA)
     if (VP8GetCPUInfo(kMSA)) {
       VP8LEncDspInitMSA();
+    }
+#endif
+#if defined(WEBP_HAVE_VSX)
+    if (VP8GetCPUInfo(kVSX)) {
+      VP8LEncDspInitVSX();
     }
 #endif
   }
