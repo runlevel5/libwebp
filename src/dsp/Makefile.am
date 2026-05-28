@@ -119,6 +119,7 @@ libwebpdspdecode_vsx_la_SOURCES =
 libwebpdspdecode_vsx_la_SOURCES += alpha_processing_vsx.c
 libwebpdspdecode_vsx_la_SOURCES += dec_vsx.c
 libwebpdspdecode_vsx_la_SOURCES += filters_vsx.c
+libwebpdspdecode_vsx_la_SOURCES += lossless_vsx.c
 libwebpdspdecode_vsx_la_SOURCES += rescaler_vsx.c
 libwebpdspdecode_vsx_la_SOURCES += upsampling_vsx.c
 libwebpdspdecode_vsx_la_SOURCES += yuv_vsx.c
