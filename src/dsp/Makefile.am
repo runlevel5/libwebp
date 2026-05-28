@@ -116,6 +116,7 @@ libwebpdspdecode_mips_dsp_r2_la_CPPFLAGS = $(libwebpdsp_mips_dsp_r2_la_CPPFLAGS)
 libwebpdspdecode_mips_dsp_r2_la_CFLAGS = $(libwebpdsp_mips_dsp_r2_la_CFLAGS)
 
 libwebpdspdecode_vsx_la_SOURCES =
+libwebpdspdecode_vsx_la_SOURCES += alpha_processing_vsx.c
 libwebpdspdecode_vsx_la_SOURCES += dec_vsx.c
 libwebpdspdecode_vsx_la_SOURCES += rescaler_vsx.c
 libwebpdspdecode_vsx_la_SOURCES += upsampling_vsx.c
