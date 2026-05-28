@@ -15,6 +15,7 @@ noinst_LTLIBRARIES += libwebpdsp_mips32.la
 noinst_LTLIBRARIES += libwebpdspdecode_mips32.la
 noinst_LTLIBRARIES += libwebpdsp_mips_dsp_r2.la
 noinst_LTLIBRARIES += libwebpdspdecode_mips_dsp_r2.la
+noinst_LTLIBRARIES += libwebpdsp_vsx.la
 noinst_LTLIBRARIES += libwebpdspdecode_vsx.la
 
 if BUILD_LIBWEBPDECODER
@@ -126,6 +127,12 @@ libwebpdspdecode_vsx_la_SOURCES += yuv_vsx.c
 libwebpdspdecode_vsx_la_CPPFLAGS = $(libwebpdsp_la_CPPFLAGS)
 libwebpdspdecode_vsx_la_CFLAGS = $(AM_CFLAGS) $(VSX_FLAGS)
 
+libwebpdsp_vsx_la_SOURCES =
+libwebpdsp_vsx_la_SOURCES += lossless_enc_vsx.c
+libwebpdsp_vsx_la_CPPFLAGS = $(libwebpdsp_la_CPPFLAGS)
+libwebpdsp_vsx_la_CFLAGS = $(AM_CFLAGS) $(VSX_FLAGS)
+libwebpdsp_vsx_la_LIBADD = libwebpdspdecode_vsx.la
+
 libwebpdsp_sse2_la_SOURCES =
 libwebpdsp_sse2_la_SOURCES += cost_sse2.c
 libwebpdsp_sse2_la_SOURCES += enc_sse2.c
@@ -197,7 +204,7 @@ libwebpdsp_la_LIBADD += libwebpdsp_neon.la
 libwebpdsp_la_LIBADD += libwebpdsp_msa.la
 libwebpdsp_la_LIBADD += libwebpdsp_mips32.la
 libwebpdsp_la_LIBADD += libwebpdsp_mips_dsp_r2.la
-libwebpdsp_la_LIBADD += libwebpdspdecode_vsx.la
+libwebpdsp_la_LIBADD += libwebpdsp_vsx.la
 
 if BUILD_LIBWEBPDECODER
   libwebpdspdecode_la_SOURCES = $(COMMON_SOURCES)
