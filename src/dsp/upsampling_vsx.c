@@ -125,6 +125,10 @@ UPSAMPLE_FUNC(UpsampleBgraLinePair_VSX, VP8YuvToBgra, VP8YuvToBgra32_VSX, 4)
 UPSAMPLE_FUNC(UpsampleArgbLinePair_VSX, VP8YuvToArgb, VP8YuvToArgb32_VSX, 4)
 UPSAMPLE_FUNC(UpsampleRgbLinePair_VSX, VP8YuvToRgb, VP8YuvToRgb32_VSX, 3)
 UPSAMPLE_FUNC(UpsampleBgrLinePair_VSX, VP8YuvToBgr, VP8YuvToBgr32_VSX, 3)
+UPSAMPLE_FUNC(UpsampleRgba4444LinePair_VSX, VP8YuvToRgba4444,
+              VP8YuvToRgba444432_VSX, 2)
+UPSAMPLE_FUNC(UpsampleRgb565LinePair_VSX, VP8YuvToRgb565, VP8YuvToRgb56532_VSX,
+              2)
 
 extern WebPUpsampleLinePairFunc WebPUpsamplers[/* MODE_LAST */];
 
@@ -137,6 +141,9 @@ WEBP_TSAN_IGNORE_FUNCTION void WebPInitUpsamplersVSX(void) {
   WebPUpsamplers[MODE_bgrA] = UpsampleBgraLinePair_VSX;
   WebPUpsamplers[MODE_RGB] = UpsampleRgbLinePair_VSX;
   WebPUpsamplers[MODE_BGR] = UpsampleBgrLinePair_VSX;
+  WebPUpsamplers[MODE_RGB_565] = UpsampleRgb565LinePair_VSX;
+  WebPUpsamplers[MODE_RGBA_4444] = UpsampleRgba4444LinePair_VSX;
+  WebPUpsamplers[MODE_rgbA_4444] = UpsampleRgba4444LinePair_VSX;
 #if !defined(WEBP_REDUCE_CSP)
   WebPUpsamplers[MODE_ARGB] = UpsampleArgbLinePair_VSX;
   WebPUpsamplers[MODE_Argb] = UpsampleArgbLinePair_VSX;
