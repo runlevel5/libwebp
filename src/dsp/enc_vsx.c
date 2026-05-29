@@ -627,11 +627,361 @@ static int Quantize2Blocks_VSX(int16_t in[32], int16_t out[32],
 }
 
 //------------------------------------------------------------------------------
+// Intra prediction.
+
+#define SLLI(x, n) vec_sld((x), kZero8, (n))
+#define SRLI(x, n) vec_sld(kZero8, (x), 16 - (n))
+static const u8x16 kZero8 = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+// Sum of the low 'count' bytes of v (count is 8 or 16).
+static WEBP_INLINE int HSum8b_VSX(u8x16 v) {
+  const u8x16 ones = vec_splats((unsigned char)1);
+  const u32x4 s = vec_msum(v, ones, vec_splats((unsigned int)0));
+  return (int)HorizontalSumS32_VSX((i32x4)s);
+}
+
+static WEBP_INLINE void Fill_VSX(uint8_t* dst, int value, int size) {
+  int j;
+  for (j = 0; j < size; ++j) memset(dst + j * BPS, value, size);
+}
+
+static WEBP_INLINE void Put_VSX(uint8_t v, uint8_t* dst, int size) {
+  const u8x16 values = vec_splats((unsigned char)v);
+  int j;
+  for (j = 0; j < size; ++j) memcpy(dst + j * BPS, &values, size);
+}
+
+static WEBP_INLINE void VerticalPred_VSX(uint8_t* WEBP_RESTRICT dst,
+                                         const uint8_t* WEBP_RESTRICT top,
+                                         int size) {
+  if (top != NULL) {
+    int j;
+    for (j = 0; j < size; ++j) memcpy(dst + j * BPS, top, size);
+  } else {
+    Fill_VSX(dst, 127, size);
+  }
+}
+
+static WEBP_INLINE void HorizontalPred_VSX(uint8_t* WEBP_RESTRICT dst,
+                                           const uint8_t* WEBP_RESTRICT left,
+                                           int size) {
+  if (left != NULL) {
+    int j;
+    for (j = 0; j < size; ++j) {
+      memset(dst + j * BPS, left[j], size);
+    }
+  } else {
+    Fill_VSX(dst, 129, size);
+  }
+}
+
+static WEBP_INLINE void TM_VSX(uint8_t* WEBP_RESTRICT dst,
+                               const uint8_t* WEBP_RESTRICT left,
+                               const uint8_t* WEBP_RESTRICT top, int size) {
+  const u8x16 zero = vec_splats((unsigned char)0);
+  const i16x8 tl = vec_splats((short)left[-1]);
+  int y;
+  if (size == 8) {
+    const i16x8 top_base = (i16x8)vec_mergeh(Load64_VSX(top), zero);
+    for (y = 0; y < 8; ++y, dst += BPS) {
+      const i16x8 base = vec_splats((short)left[y]);
+      const u8x16 out =
+          vec_packsu(vec_add(vec_sub(base, tl), top_base), (i16x8)zero);
+      memcpy(dst, &out, 8);
+    }
+  } else {
+    const u8x16 t = vec_xl(0, (unsigned char*)top);
+    const i16x8 top0 = (i16x8)vec_mergeh(t, zero);
+    const i16x8 top1 = (i16x8)vec_mergel(t, zero);
+    for (y = 0; y < 16; ++y, dst += BPS) {
+      const i16x8 base = vec_sub(vec_splats((short)left[y]), tl);
+      const u8x16 out = vec_packsu(vec_add(base, top0), vec_add(base, top1));
+      vec_xst(out, 0, dst);
+    }
+  }
+}
+
+static WEBP_INLINE void TrueMotion_VSX(uint8_t* WEBP_RESTRICT dst,
+                                       const uint8_t* WEBP_RESTRICT left,
+                                       const uint8_t* WEBP_RESTRICT top,
+                                       int size) {
+  if (left != NULL) {
+    if (top != NULL) {
+      TM_VSX(dst, left, top, size);
+    } else {
+      HorizontalPred_VSX(dst, left, size);
+    }
+  } else if (top != NULL) {
+    VerticalPred_VSX(dst, top, size);
+  } else {
+    Fill_VSX(dst, 129, size);
+  }
+}
+
+static WEBP_INLINE void DC8uvMode_VSX(uint8_t* WEBP_RESTRICT dst,
+                                      const uint8_t* WEBP_RESTRICT left,
+                                      const uint8_t* WEBP_RESTRICT top) {
+  if (top != NULL) {
+    if (left != NULL) {
+      const u8x16 combined =
+          (u8x16)vec_mergeh((i64x2)Load64_VSX(top), (i64x2)Load64_VSX(left));
+      Put_VSX((HSum8b_VSX(combined) + 8) >> 4, dst, 8);
+    } else {
+      // Zero the duplicated high half so only 8 bytes are summed.
+      const u8x16 t = (u8x16)vec_mergeh((i64x2)Load64_VSX(top), (i64x2)kZero8);
+      Put_VSX((HSum8b_VSX(t) + 4) >> 3, dst, 8);
+    }
+  } else if (left != NULL) {
+    const u8x16 l = (u8x16)vec_mergeh((i64x2)Load64_VSX(left), (i64x2)kZero8);
+    Put_VSX((HSum8b_VSX(l) + 4) >> 3, dst, 8);
+  } else {
+    Put_VSX(0x80, dst, 8);
+  }
+}
+
+static WEBP_INLINE void DC16Mode_VSX(uint8_t* WEBP_RESTRICT dst,
+                                     const uint8_t* WEBP_RESTRICT left,
+                                     const uint8_t* WEBP_RESTRICT top) {
+  if (top != NULL) {
+    const int t = HSum8b_VSX(vec_xl(0, (unsigned char*)top));
+    if (left != NULL) {
+      const int l = HSum8b_VSX(vec_xl(0, (unsigned char*)left));
+      Put_VSX((t + l + 16) >> 5, dst, 16);
+    } else {
+      Put_VSX((t + 8) >> 4, dst, 16);
+    }
+  } else if (left != NULL) {
+    const int l = HSum8b_VSX(vec_xl(0, (unsigned char*)left));
+    Put_VSX((l + 8) >> 4, dst, 16);
+  } else {
+    Put_VSX(0x80, dst, 16);
+  }
+}
+
+static void Intra16Preds_VSX(uint8_t* WEBP_RESTRICT dst,
+                             const uint8_t* WEBP_RESTRICT left,
+                             const uint8_t* WEBP_RESTRICT top) {
+  DC16Mode_VSX(I16DC16 + dst, left, top);
+  VerticalPred_VSX(I16VE16 + dst, top, 16);
+  HorizontalPred_VSX(I16HE16 + dst, left, 16);
+  TrueMotion_VSX(I16TM16 + dst, left, top, 16);
+}
+
+static void IntraChromaPreds_VSX(uint8_t* WEBP_RESTRICT dst,
+                                 const uint8_t* WEBP_RESTRICT left,
+                                 const uint8_t* WEBP_RESTRICT top) {
+  // U block.
+  DC8uvMode_VSX(C8DC8 + dst, left, top);
+  VerticalPred_VSX(C8VE8 + dst, top, 8);
+  HorizontalPred_VSX(C8HE8 + dst, left, 8);
+  TrueMotion_VSX(C8TM8 + dst, left, top, 8);
+  // V block.
+  dst += 8;
+  if (top != NULL) top += 8;
+  if (left != NULL) left += 16;
+  DC8uvMode_VSX(C8DC8 + dst, left, top);
+  VerticalPred_VSX(C8VE8 + dst, top, 8);
+  HorizontalPred_VSX(C8HE8 + dst, left, 8);
+  TrueMotion_VSX(C8TM8 + dst, left, top, 8);
+}
+
+//------------------------------------------------------------------------------
+// 4x4 prediction.
+
+#define DST(x, y) dst[(x) + (y) * BPS]
+#define AVG3(a, b, c) (((a) + 2 * (b) + (c) + 2) >> 2)
+#define AVG2(a, b) (((a) + (b) + 1) >> 1)
+
+static WEBP_INLINE void Store4_VSX(uint8_t* dst, u8x16 v) {
+  uint32_t out = vec_extract((u32x4)v, 0);
+  memcpy(dst, &out, 4);
+}
+
+static WEBP_INLINE void VE4_VSX(uint8_t* WEBP_RESTRICT dst,
+                                const uint8_t* WEBP_RESTRICT top) {
+  const u8x16 one = vec_splats((unsigned char)1);
+  const u8x16 ABCDEFGH = Load64_VSX(top - 1);
+  const u8x16 BCDEFGH0 = SRLI(ABCDEFGH, 1);
+  const u8x16 CDEFGH00 = SRLI(ABCDEFGH, 2);
+  const u8x16 a = vec_avg(ABCDEFGH, CDEFGH00);
+  const u8x16 lsb = vec_and(vec_xor(ABCDEFGH, CDEFGH00), one);
+  const u8x16 b = vec_subs(a, lsb);
+  const u8x16 avg = vec_avg(b, BCDEFGH0);
+  int i;
+  for (i = 0; i < 4; ++i) Store4_VSX(dst + i * BPS, avg);
+}
+
+static WEBP_INLINE void HE4_VSX(uint8_t* WEBP_RESTRICT dst,
+                                const uint8_t* WEBP_RESTRICT top) {
+  const int X = top[-1], I = top[-2], J = top[-3], K = top[-4], L = top[-5];
+  uint32_t v0 = 0x01010101U * AVG3(X, I, J);
+  uint32_t v1 = 0x01010101U * AVG3(I, J, K);
+  uint32_t v2 = 0x01010101U * AVG3(J, K, L);
+  uint32_t v3 = 0x01010101U * AVG3(K, L, L);
+  memcpy(dst + 0 * BPS, &v0, 4);
+  memcpy(dst + 1 * BPS, &v1, 4);
+  memcpy(dst + 2 * BPS, &v2, 4);
+  memcpy(dst + 3 * BPS, &v3, 4);
+}
+
+static WEBP_INLINE void DC4_VSX(uint8_t* WEBP_RESTRICT dst,
+                                const uint8_t* WEBP_RESTRICT top) {
+  uint32_t dc = 4;
+  int i;
+  for (i = 0; i < 4; ++i) dc += top[i] + top[-5 + i];
+  Fill_VSX(dst, dc >> 3, 4);
+}
+
+static WEBP_INLINE void LD4_VSX(uint8_t* WEBP_RESTRICT dst,
+                                const uint8_t* WEBP_RESTRICT top) {
+  const u8x16 one = vec_splats((unsigned char)1);
+  const u8x16 ABCDEFGH = Load64_VSX(top);
+  const u8x16 BCDEFGH0 = SRLI(ABCDEFGH, 1);
+  const u8x16 CDEFGH00 = SRLI(ABCDEFGH, 2);
+  const u8x16 CDEFGHH0 = (u8x16)vec_insert((short)top[7], (i16x8)CDEFGH00, 3);
+  const u8x16 avg1 = vec_avg(ABCDEFGH, CDEFGHH0);
+  const u8x16 lsb = vec_and(vec_xor(ABCDEFGH, CDEFGHH0), one);
+  const u8x16 avg2 = vec_subs(avg1, lsb);
+  const u8x16 abcdefg = vec_avg(avg2, BCDEFGH0);
+  Store4_VSX(dst + 0 * BPS, abcdefg);
+  Store4_VSX(dst + 1 * BPS, SRLI(abcdefg, 1));
+  Store4_VSX(dst + 2 * BPS, SRLI(abcdefg, 2));
+  Store4_VSX(dst + 3 * BPS, SRLI(abcdefg, 3));
+}
+
+static WEBP_INLINE void VR4_VSX(uint8_t* WEBP_RESTRICT dst,
+                                const uint8_t* WEBP_RESTRICT top) {
+  const u8x16 one = vec_splats((unsigned char)1);
+  const int I = top[-2], J = top[-3], K = top[-4], X = top[-1];
+  const u8x16 XABCD = Load64_VSX(top - 1);
+  const u8x16 ABCD0 = SRLI(XABCD, 1);
+  const u8x16 abcd = vec_avg(XABCD, ABCD0);
+  const u8x16 _XABCD = SLLI(XABCD, 1);
+  const u8x16 IXABCD =
+      (u8x16)vec_insert((short)(I | (X << 8)), (i16x8)_XABCD, 0);
+  const u8x16 avg1 = vec_avg(IXABCD, ABCD0);
+  const u8x16 lsb = vec_and(vec_xor(IXABCD, ABCD0), one);
+  const u8x16 avg2 = vec_subs(avg1, lsb);
+  const u8x16 efgh = vec_avg(avg2, XABCD);
+  Store4_VSX(dst + 0 * BPS, abcd);
+  Store4_VSX(dst + 1 * BPS, efgh);
+  Store4_VSX(dst + 2 * BPS, SLLI(abcd, 1));
+  Store4_VSX(dst + 3 * BPS, SLLI(efgh, 1));
+  DST(0, 2) = AVG3(J, I, X);
+  DST(0, 3) = AVG3(K, J, I);
+}
+
+static WEBP_INLINE void VL4_VSX(uint8_t* WEBP_RESTRICT dst,
+                                const uint8_t* WEBP_RESTRICT top) {
+  const u8x16 one = vec_splats((unsigned char)1);
+  const u8x16 ABCDEFGH = Load64_VSX(top);
+  const u8x16 BCDEFGH_ = SRLI(ABCDEFGH, 1);
+  const u8x16 CDEFGH__ = SRLI(ABCDEFGH, 2);
+  const u8x16 avg1 = vec_avg(ABCDEFGH, BCDEFGH_);
+  const u8x16 avg2 = vec_avg(CDEFGH__, BCDEFGH_);
+  const u8x16 avg3 = vec_avg(avg1, avg2);
+  const u8x16 lsb1 = vec_and(vec_xor(avg1, avg2), one);
+  const u8x16 ab = vec_xor(ABCDEFGH, BCDEFGH_);
+  const u8x16 bc = vec_xor(CDEFGH__, BCDEFGH_);
+  const u8x16 abbc = vec_or(ab, bc);
+  const u8x16 lsb2 = vec_and(abbc, lsb1);
+  const u8x16 avg4 = vec_subs(avg3, lsb2);
+  const uint32_t extra_out = vec_extract((u32x4)SRLI(avg4, 4), 0);
+  Store4_VSX(dst + 0 * BPS, avg1);
+  Store4_VSX(dst + 1 * BPS, avg4);
+  Store4_VSX(dst + 2 * BPS, SRLI(avg1, 1));
+  Store4_VSX(dst + 3 * BPS, SRLI(avg4, 1));
+  DST(3, 2) = (extra_out >> 0) & 0xff;
+  DST(3, 3) = (extra_out >> 8) & 0xff;
+}
+
+static WEBP_INLINE void RD4_VSX(uint8_t* WEBP_RESTRICT dst,
+                                const uint8_t* WEBP_RESTRICT top) {
+  const u8x16 one = vec_splats((unsigned char)1);
+  const u8x16 LKJIXABC = Load64_VSX(top - 5);
+  const u8x16 LKJIXABCD = (u8x16)vec_insert((short)top[3], (i16x8)LKJIXABC, 4);
+  const u8x16 KJIXABCD_ = SRLI(LKJIXABCD, 1);
+  const u8x16 JIXABCD__ = SRLI(LKJIXABCD, 2);
+  const u8x16 avg1 = vec_avg(JIXABCD__, LKJIXABCD);
+  const u8x16 lsb = vec_and(vec_xor(JIXABCD__, LKJIXABCD), one);
+  const u8x16 avg2 = vec_subs(avg1, lsb);
+  const u8x16 abcdefg = vec_avg(avg2, KJIXABCD_);
+  Store4_VSX(dst + 3 * BPS, abcdefg);
+  Store4_VSX(dst + 2 * BPS, SRLI(abcdefg, 1));
+  Store4_VSX(dst + 1 * BPS, SRLI(abcdefg, 2));
+  Store4_VSX(dst + 0 * BPS, SRLI(abcdefg, 3));
+}
+
+static WEBP_INLINE void HU4_VSX(uint8_t* WEBP_RESTRICT dst,
+                                const uint8_t* WEBP_RESTRICT top) {
+  const int I = top[-2], J = top[-3], K = top[-4], L = top[-5];
+  DST(0, 0) = AVG2(I, J);
+  DST(2, 0) = DST(0, 1) = AVG2(J, K);
+  DST(2, 1) = DST(0, 2) = AVG2(K, L);
+  DST(1, 0) = AVG3(I, J, K);
+  DST(3, 0) = DST(1, 1) = AVG3(J, K, L);
+  DST(3, 1) = DST(1, 2) = AVG3(K, L, L);
+  DST(3, 2) = DST(2, 2) = DST(0, 3) = DST(1, 3) = DST(2, 3) = DST(3, 3) = L;
+}
+
+static WEBP_INLINE void HD4_VSX(uint8_t* WEBP_RESTRICT dst,
+                                const uint8_t* WEBP_RESTRICT top) {
+  const int X = top[-1], I = top[-2], J = top[-3], K = top[-4], L = top[-5];
+  const int A = top[0], B = top[1], C = top[2];
+  DST(0, 0) = DST(2, 1) = AVG2(I, X);
+  DST(0, 1) = DST(2, 2) = AVG2(J, I);
+  DST(0, 2) = DST(2, 3) = AVG2(K, J);
+  DST(0, 3) = AVG2(L, K);
+  DST(3, 0) = AVG3(A, B, C);
+  DST(2, 0) = AVG3(X, A, B);
+  DST(1, 0) = DST(3, 1) = AVG3(I, X, A);
+  DST(1, 1) = DST(3, 2) = AVG3(J, I, X);
+  DST(1, 2) = DST(3, 3) = AVG3(K, J, I);
+  DST(1, 3) = AVG3(L, K, J);
+}
+
+static WEBP_INLINE void TM4_VSX(uint8_t* WEBP_RESTRICT dst,
+                                const uint8_t* WEBP_RESTRICT top) {
+  const u8x16 zero = vec_splats((unsigned char)0);
+  const i16x8 top_base = (i16x8)vec_mergeh(Load64_VSX(top), zero);
+  const i16x8 tl = vec_splats((short)top[-1]);
+  int y;
+  for (y = 0; y < 4; ++y, dst += BPS) {
+    const i16x8 base = vec_sub(vec_splats((short)top[-2 - y]), tl);
+    const u8x16 out = vec_packsu(vec_add(base, top_base), (i16x8)zero);
+    Store4_VSX(dst, out);
+  }
+}
+
+static void Intra4Preds_VSX(uint8_t* WEBP_RESTRICT dst,
+                            const uint8_t* WEBP_RESTRICT top) {
+  DC4_VSX(I4DC4 + dst, top);
+  TM4_VSX(I4TM4 + dst, top);
+  VE4_VSX(I4VE4 + dst, top);
+  HE4_VSX(I4HE4 + dst, top);
+  RD4_VSX(I4RD4 + dst, top);
+  VR4_VSX(I4VR4 + dst, top);
+  LD4_VSX(I4LD4 + dst, top);
+  VL4_VSX(I4VL4 + dst, top);
+  HD4_VSX(I4HD4 + dst, top);
+  HU4_VSX(I4HU4 + dst, top);
+}
+
+#undef DST
+#undef AVG3
+#undef AVG2
+#undef SLLI
+#undef SRLI
+
+//------------------------------------------------------------------------------
 
 extern void VP8EncDspInitVSX(void);
 
 WEBP_TSAN_IGNORE_FUNCTION void VP8EncDspInitVSX(void) {
   VP8ITransform = ITransform_VSX;
+  VP8EncPredLuma16 = Intra16Preds_VSX;
+  VP8EncPredChroma8 = IntraChromaPreds_VSX;
+  VP8EncPredLuma4 = Intra4Preds_VSX;
   VP8EncQuantizeBlock = QuantizeBlock_VSX;
   VP8EncQuantize2Blocks = Quantize2Blocks_VSX;
   VP8EncQuantizeBlockWHT = QuantizeBlockWHT_VSX;
