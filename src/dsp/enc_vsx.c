@@ -28,6 +28,7 @@ typedef __vector unsigned short u16x8;
 typedef __vector signed short i16x8;
 typedef __vector unsigned int u32x4;
 typedef __vector signed int i32x4;
+typedef __vector signed long long i64x2;
 
 //------------------------------------------------------------------------------
 // Sum of squared errors.
@@ -161,10 +162,274 @@ static void Mean16x4_VSX(const uint8_t* WEBP_RESTRICT ref, uint32_t dc[4]) {
 }
 
 //------------------------------------------------------------------------------
+// Inverse transform (shares the decode IDCT math).
+
+// Signed 16-bit multiply-high: (a * b) >> 16.
+static WEBP_INLINE i16x8 MulHi16_S(i16x8 a, i16x8 b) {
+  const u32x4 sh = vec_splats((unsigned int)16);
+  const i32x4 e = vec_sra(vec_mule(a, b), sh);
+  const i32x4 o = vec_sra(vec_mulo(a, b), sh);
+  return (i16x8)vec_pack(vec_mergeh(e, o), vec_mergel(e, o));
+}
+
+// Transpose two interleaved 4x4 blocks of 16-bit values.
+static WEBP_INLINE void Transpose2_4x4(i16x8 in0, i16x8 in1, i16x8 in2,
+                                       i16x8 in3, i16x8* out0, i16x8* out1,
+                                       i16x8* out2, i16x8* out3) {
+  const i16x8 t0 = (i16x8)vec_mergeh(in0, in1);
+  const i16x8 t1 = (i16x8)vec_mergeh(in2, in3);
+  const i16x8 t2 = (i16x8)vec_mergel(in0, in1);
+  const i16x8 t3 = (i16x8)vec_mergel(in2, in3);
+  const i32x4 u0 = vec_mergeh((i32x4)t0, (i32x4)t1);
+  const i32x4 u1 = vec_mergeh((i32x4)t2, (i32x4)t3);
+  const i32x4 u2 = vec_mergel((i32x4)t0, (i32x4)t1);
+  const i32x4 u3 = vec_mergel((i32x4)t2, (i32x4)t3);
+  *out0 = (i16x8)vec_mergeh((i64x2)u0, (i64x2)u1);
+  *out1 = (i16x8)vec_mergel((i64x2)u0, (i64x2)u1);
+  *out2 = (i16x8)vec_mergeh((i64x2)u2, (i64x2)u3);
+  *out3 = (i16x8)vec_mergel((i64x2)u2, (i64x2)u3);
+}
+
+static WEBP_INLINE i16x8 Load4Coeffs(const int16_t* WEBP_RESTRICT p) {
+  int16_t tmp[8] = {0};
+  memcpy(tmp, p, 4 * sizeof(int16_t));
+  return *(const i16x8*)tmp;
+}
+
+static WEBP_INLINE i16x8 LoadRef4(const uint8_t* WEBP_RESTRICT p, int n) {
+  unsigned char tmp[16] = {0};
+  memcpy(tmp, p, n);
+  return (i16x8)vec_mergeh(vec_xl(0, tmp), vec_splats((unsigned char)0));
+}
+
+static void ITransform_One_VSX(const uint8_t* WEBP_RESTRICT ref,
+                               const int16_t* WEBP_RESTRICT in,
+                               uint8_t* WEBP_RESTRICT dst, int do_two) {
+  const i16x8 k1 = vec_splats((short)20091);
+  const i16x8 k2 = vec_splats((short)-30068);
+  const u16x8 three = vec_splats((unsigned short)3);
+  i16x8 in0 = Load4Coeffs(in + 0), in1 = Load4Coeffs(in + 4);
+  i16x8 in2 = Load4Coeffs(in + 8), in3 = Load4Coeffs(in + 12);
+  i16x8 T0, T1, T2, T3;
+
+  if (do_two) {
+    in0 = (i16x8)vec_mergeh((i64x2)in0, (i64x2)Load4Coeffs(in + 16));
+    in1 = (i16x8)vec_mergeh((i64x2)in1, (i64x2)Load4Coeffs(in + 20));
+    in2 = (i16x8)vec_mergeh((i64x2)in2, (i64x2)Load4Coeffs(in + 24));
+    in3 = (i16x8)vec_mergeh((i64x2)in3, (i64x2)Load4Coeffs(in + 28));
+  }
+
+  {  // Vertical pass + transpose.
+    const i16x8 a = vec_add(in0, in2);
+    const i16x8 b = vec_sub(in0, in2);
+    const i16x8 c = vec_add(vec_sub(in1, in3),
+                            vec_sub(MulHi16_S(in1, k2), MulHi16_S(in3, k1)));
+    const i16x8 d = vec_add(vec_add(in1, in3),
+                            vec_add(MulHi16_S(in1, k1), MulHi16_S(in3, k2)));
+    Transpose2_4x4(vec_add(a, d), vec_add(b, c), vec_sub(b, c), vec_sub(a, d),
+                   &T0, &T1, &T2, &T3);
+  }
+  {  // Horizontal pass + transpose.
+    const i16x8 dc = vec_add(T0, vec_splats((short)4));
+    const i16x8 a = vec_add(dc, T2);
+    const i16x8 b = vec_sub(dc, T2);
+    const i16x8 c =
+        vec_add(vec_sub(T1, T3), vec_sub(MulHi16_S(T1, k2), MulHi16_S(T3, k1)));
+    const i16x8 d =
+        vec_add(vec_add(T1, T3), vec_add(MulHi16_S(T1, k1), MulHi16_S(T3, k2)));
+    const i16x8 s0 = vec_sra(vec_add(a, d), three);
+    const i16x8 s1 = vec_sra(vec_add(b, c), three);
+    const i16x8 s2 = vec_sra(vec_sub(b, c), three);
+    const i16x8 s3 = vec_sra(vec_sub(a, d), three);
+    Transpose2_4x4(s0, s1, s2, s3, &T0, &T1, &T2, &T3);
+  }
+  {  // Add to the reference pixels and store with saturation.
+    const int n = do_two ? 8 : 4;
+    const i16x8 r0 = LoadRef4(ref + 0 * BPS, n);
+    const i16x8 r1 = LoadRef4(ref + 1 * BPS, n);
+    const i16x8 r2 = LoadRef4(ref + 2 * BPS, n);
+    const i16x8 r3 = LoadRef4(ref + 3 * BPS, n);
+    const u8x16 o0 = vec_packsu(vec_add(r0, T0), vec_add(r0, T0));
+    const u8x16 o1 = vec_packsu(vec_add(r1, T1), vec_add(r1, T1));
+    const u8x16 o2 = vec_packsu(vec_add(r2, T2), vec_add(r2, T2));
+    const u8x16 o3 = vec_packsu(vec_add(r3, T3), vec_add(r3, T3));
+    unsigned char b0[16], b1[16], b2[16], b3[16];
+    memcpy(b0, &o0, 16);
+    memcpy(b1, &o1, 16);
+    memcpy(b2, &o2, 16);
+    memcpy(b3, &o3, 16);
+    memcpy(dst + 0 * BPS, b0, n);
+    memcpy(dst + 1 * BPS, b1, n);
+    memcpy(dst + 2 * BPS, b2, n);
+    memcpy(dst + 3 * BPS, b3, n);
+  }
+}
+
+static void ITransform_VSX(const uint8_t* WEBP_RESTRICT ref,
+                           const int16_t* WEBP_RESTRICT in,
+                           uint8_t* WEBP_RESTRICT dst, int do_two) {
+  ITransform_One_VSX(ref, in, dst, do_two);
+}
+
+//------------------------------------------------------------------------------
+// Forward transform.
+
+// Transpose four 4-lane 32-bit row vectors into column vectors.
+static WEBP_INLINE void Transpose4x4_S32(i32x4 r0, i32x4 r1, i32x4 r2, i32x4 r3,
+                                         i32x4* c0, i32x4* c1, i32x4* c2,
+                                         i32x4* c3) {
+  const i32x4 a = vec_mergeh(r0, r2);
+  const i32x4 b = vec_mergeh(r1, r3);
+  const i32x4 c = vec_mergel(r0, r2);
+  const i32x4 d = vec_mergel(r1, r3);
+  *c0 = vec_mergeh(a, b);
+  *c1 = vec_mergel(a, b);
+  *c2 = vec_mergeh(c, d);
+  *c3 = vec_mergel(c, d);
+}
+
+// Loads 4 bytes, zero-extended to four 32-bit lanes.
+static WEBP_INLINE i32x4 Load4u8_S32(const uint8_t* p) {
+  const u8x16 zero = vec_splats((unsigned char)0);
+  uint32_t v;
+  memcpy(&v, p, 4);
+  const u8x16 b = (u8x16)vec_splats(v);
+  return (i32x4)vec_mergeh((u16x8)vec_mergeh(b, zero), (u16x8)zero);
+}
+
+static void FTransform_One_VSX(const uint8_t* WEBP_RESTRICT src,
+                               const uint8_t* WEBP_RESTRICT ref,
+                               int16_t* WEBP_RESTRICT out) {
+  const i32x4 k2217 = vec_splats(2217);
+  const i32x4 k5352 = vec_splats(5352);
+  const i32x4 zero = vec_splats(0);
+  const i32x4 one = vec_splats(1);
+  const u32x4 sh3 = vec_splats((unsigned int)3);
+  const u32x4 sh4 = vec_splats((unsigned int)4);
+  const u32x4 sh9 = vec_splats((unsigned int)9);
+  const u32x4 sh16 = vec_splats((unsigned int)16);
+  i32x4 r0 = vec_sub(Load4u8_S32(src + 0 * BPS), Load4u8_S32(ref + 0 * BPS));
+  i32x4 r1 = vec_sub(Load4u8_S32(src + 1 * BPS), Load4u8_S32(ref + 1 * BPS));
+  i32x4 r2 = vec_sub(Load4u8_S32(src + 2 * BPS), Load4u8_S32(ref + 2 * BPS));
+  i32x4 r3 = vec_sub(Load4u8_S32(src + 3 * BPS), Load4u8_S32(ref + 3 * BPS));
+  i32x4 d0, d1, d2, d3;  // columns of the pixel diff
+  Transpose4x4_S32(r0, r1, r2, r3, &d0, &d1, &d2, &d3);
+  {  // pass 1
+    const i32x4 a0 = vec_add(d0, d3);
+    const i32x4 a1 = vec_add(d1, d2);
+    const i32x4 a2 = vec_sub(d1, d2);
+    const i32x4 a3 = vec_sub(d0, d3);
+    const i32x4 t0 = vec_sl(vec_add(a0, a1), sh3);
+    const i32x4 t2 = vec_sl(vec_sub(a0, a1), sh3);
+    const i32x4 t1 =
+        vec_sra(vec_add(vec_add(vec_mul(a2, k2217), vec_mul(a3, k5352)),
+                        vec_splats(1812)),
+                sh9);
+    const i32x4 t3 =
+        vec_sra(vec_add(vec_sub(vec_mul(a3, k2217), vec_mul(a2, k5352)),
+                        vec_splats(937)),
+                sh9);
+    Transpose4x4_S32(t0, t1, t2, t3, &d0, &d1, &d2, &d3);
+  }
+  {  // pass 2
+    const i32x4 a0 = vec_add(d0, d3);
+    const i32x4 a1 = vec_add(d1, d2);
+    const i32x4 a2 = vec_sub(d1, d2);
+    const i32x4 a3 = vec_sub(d0, d3);
+    const i32x4 o0 = vec_sra(vec_add(vec_add(a0, a1), vec_splats(7)), sh4);
+    const i32x4 o2 = vec_sra(vec_add(vec_sub(a0, a1), vec_splats(7)), sh4);
+    // (a3 != 0) correction: 1 where a3 is non-zero.
+    const i32x4 a3nz = (i32x4)vec_andc(one, (i32x4)vec_cmpeq(a3, zero));
+    const i32x4 o1 =
+        vec_add(vec_sra(vec_add(vec_add(vec_mul(a2, k2217), vec_mul(a3, k5352)),
+                                vec_splats(12000)),
+                        sh16),
+                a3nz);
+    const i32x4 o3 =
+        vec_sra(vec_add(vec_sub(vec_mul(a3, k2217), vec_mul(a2, k5352)),
+                        vec_splats(51000)),
+                sh16);
+    const i16x8 r01 = vec_pack(o0, o1);
+    const i16x8 r23 = vec_pack(o2, o3);
+    int16_t b01[8], b23[8];
+    vec_xst(r01, 0, b01);
+    vec_xst(r23, 0, b23);
+    memcpy(out + 0, b01, 4 * sizeof(int16_t));
+    memcpy(out + 4, b01 + 4, 4 * sizeof(int16_t));
+    memcpy(out + 8, b23, 4 * sizeof(int16_t));
+    memcpy(out + 12, b23 + 4, 4 * sizeof(int16_t));
+  }
+}
+
+static void FTransform_VSX(const uint8_t* WEBP_RESTRICT src,
+                           const uint8_t* WEBP_RESTRICT ref,
+                           int16_t* WEBP_RESTRICT out) {
+  FTransform_One_VSX(src, ref, out);
+}
+
+static void FTransform2_VSX(const uint8_t* WEBP_RESTRICT src,
+                            const uint8_t* WEBP_RESTRICT ref,
+                            int16_t* WEBP_RESTRICT out) {
+  FTransform_One_VSX(src + 0, ref + 0, out + 0);
+  FTransform_One_VSX(src + 4, ref + 4, out + 16);
+}
+
+//------------------------------------------------------------------------------
+// Walsh-Hadamard transform.
+
+// Gathers in[0], in[stride], in[2*stride], in[3*stride] (in int16 units).
+static WEBP_INLINE i32x4 GatherWHT(const int16_t* p, int stride) {
+  const i32x4 v = {p[0], p[stride], p[2 * stride], p[3 * stride]};
+  return v;
+}
+
+static void FTransformWHT_VSX(const int16_t* WEBP_RESTRICT in,
+                              int16_t* WEBP_RESTRICT out) {
+  const u32x4 one = vec_splats((unsigned int)1);
+  // Columns: Dk[i] = in[i * 64 + k * 16].
+  i32x4 d0 = GatherWHT(in + 0 * 16, 64);
+  i32x4 d1 = GatherWHT(in + 1 * 16, 64);
+  i32x4 d2 = GatherWHT(in + 2 * 16, 64);
+  i32x4 d3 = GatherWHT(in + 3 * 16, 64);
+  i32x4 t0, t1, t2, t3;
+  {  // pass 1
+    const i32x4 a0 = vec_add(d0, d2);
+    const i32x4 a1 = vec_add(d1, d3);
+    const i32x4 a2 = vec_sub(d1, d3);
+    const i32x4 a3 = vec_sub(d0, d2);
+    Transpose4x4_S32(vec_add(a0, a1), vec_add(a3, a2), vec_sub(a3, a2),
+                     vec_sub(a0, a1), &t0, &t1, &t2, &t3);
+  }
+  {  // pass 2
+    const i32x4 a0 = vec_add(t0, t2);
+    const i32x4 a1 = vec_add(t1, t3);
+    const i32x4 a2 = vec_sub(t1, t3);
+    const i32x4 a3 = vec_sub(t0, t2);
+    const i32x4 o0 = vec_sra(vec_add(a0, a1), one);
+    const i32x4 o1 = vec_sra(vec_add(a3, a2), one);
+    const i32x4 o2 = vec_sra(vec_sub(a3, a2), one);
+    const i32x4 o3 = vec_sra(vec_sub(a0, a1), one);
+    const i16x8 r01 = vec_pack(o0, o1);
+    const i16x8 r23 = vec_pack(o2, o3);
+    int16_t b01[8], b23[8];
+    vec_xst(r01, 0, b01);
+    vec_xst(r23, 0, b23);
+    memcpy(out + 0, b01, 4 * sizeof(int16_t));
+    memcpy(out + 4, b01 + 4, 4 * sizeof(int16_t));
+    memcpy(out + 8, b23, 4 * sizeof(int16_t));
+    memcpy(out + 12, b23 + 4, 4 * sizeof(int16_t));
+  }
+}
+
+//------------------------------------------------------------------------------
 
 extern void VP8EncDspInitVSX(void);
 
 WEBP_TSAN_IGNORE_FUNCTION void VP8EncDspInitVSX(void) {
+  VP8ITransform = ITransform_VSX;
+  VP8FTransform = FTransform_VSX;
+  VP8FTransform2 = FTransform2_VSX;
+  VP8FTransformWHT = FTransformWHT_VSX;
   VP8SSE16x16 = SSE16x16_VSX;
   VP8SSE16x8 = SSE16x8_VSX;
   VP8SSE8x8 = SSE8x8_VSX;
