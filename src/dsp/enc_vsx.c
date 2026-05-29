@@ -535,11 +535,106 @@ static void CollectHistogram_VSX(const uint8_t* WEBP_RESTRICT ref,
 }
 
 //------------------------------------------------------------------------------
+// Quantization.
+
+// Permutation controls that gather the natural-order levels into zigzag scan
+// order: out[n] = level[kZigzag[n]]. kZigzag = {0,1,4,8,5,2,3,6,
+//                                               9,12,13,10,7,11,14,15}.
+// Each coefficient is 16-bit, so control byte 2n picks byte 2*kZigzag[n] of
+// the concatenated (level[0..7] | level[8..15]) operand pair.
+static const u8x16 kZigzagLo = {0,  1,  2, 3, 8, 9, 16, 17,
+                                10, 11, 4, 5, 6, 7, 12, 13};
+static const u8x16 kZigzagHi = {18, 19, 24, 25, 26, 27, 20, 21,
+                                14, 15, 22, 23, 28, 29, 30, 31};
+
+static WEBP_INLINE int DoQuantizeBlock_VSX(
+    int16_t in[16], int16_t out[16],
+    const uint16_t* WEBP_RESTRICT const sharpen,
+    const VP8Matrix* WEBP_RESTRICT const mtx) {
+  const i16x8 max_coeff_2047 = vec_splats((short)MAX_LEVEL);
+  const i16x8 zero = vec_splats((short)0);
+  const u32x4 qfix = vec_splats((unsigned int)QFIX);
+  i16x8 in0 = (i16x8)vec_xl(0, &in[0]);
+  i16x8 in8 = (i16x8)vec_xl(0, &in[8]);
+  const u16x8 iq0 = (u16x8)vec_xl(0, (uint16_t*)&mtx->iq[0]);
+  const u16x8 iq8 = (u16x8)vec_xl(0, (uint16_t*)&mtx->iq[8]);
+  const i16x8 q0 = (i16x8)vec_xl(0, (uint16_t*)&mtx->q[0]);
+  const i16x8 q8 = (i16x8)vec_xl(0, (uint16_t*)&mtx->q[8]);
+  // sign(in): 0x0000 if positive, 0xffff if negative.
+  const i16x8 sign0 = (i16x8)vec_cmpgt(zero, in0);
+  const i16x8 sign8 = (i16x8)vec_cmpgt(zero, in8);
+  // coeff = abs(in) = (in ^ sign) - sign.
+  u16x8 coeff0 = (u16x8)vec_sub(vec_xor(in0, sign0), sign0);
+  u16x8 coeff8 = (u16x8)vec_sub(vec_xor(in8, sign8), sign8);
+  i16x8 out0, out8;
+  if (sharpen != NULL) {
+    coeff0 = vec_add(coeff0, (u16x8)vec_xl(0, (uint16_t*)&sharpen[0]));
+    coeff8 = vec_add(coeff8, (u16x8)vec_xl(0, (uint16_t*)&sharpen[8]));
+  }
+  {  // out = QUANTDIV(coeff, iQ, B, QFIX), 32-bit precision.
+    const u32x4 p0e = vec_mule(coeff0, iq0);  // even-lane 32b products
+    const u32x4 p0o = vec_mulo(coeff0, iq0);  // odd-lane
+    const u32x4 p8e = vec_mule(coeff8, iq8);
+    const u32x4 p8o = vec_mulo(coeff8, iq8);
+    i32x4 out_00 = (i32x4)vec_mergeh(p0e, p0o);  // products 0..3
+    i32x4 out_04 = (i32x4)vec_mergel(p0e, p0o);  // products 4..7
+    i32x4 out_08 = (i32x4)vec_mergeh(p8e, p8o);
+    i32x4 out_12 = (i32x4)vec_mergel(p8e, p8o);
+    out_00 = vec_add(out_00, (i32x4)vec_xl(0, (uint32_t*)&mtx->bias[0]));
+    out_04 = vec_add(out_04, (i32x4)vec_xl(0, (uint32_t*)&mtx->bias[4]));
+    out_08 = vec_add(out_08, (i32x4)vec_xl(0, (uint32_t*)&mtx->bias[8]));
+    out_12 = vec_add(out_12, (i32x4)vec_xl(0, (uint32_t*)&mtx->bias[12]));
+    out_00 = vec_sra(out_00, qfix);
+    out_04 = vec_sra(out_04, qfix);
+    out_08 = vec_sra(out_08, qfix);
+    out_12 = vec_sra(out_12, qfix);
+    out0 = vec_min(vec_packs(out_00, out_04), max_coeff_2047);
+    out8 = vec_min(vec_packs(out_08, out_12), max_coeff_2047);
+  }
+  // restore sign: if (sign) out = -out.
+  out0 = vec_sub(vec_xor(out0, sign0), sign0);
+  out8 = vec_sub(vec_xor(out8, sign8), sign8);
+  // in = out * Q.
+  vec_xst(vec_mladd(out0, q0, zero), 0, &in[0]);
+  vec_xst(vec_mladd(out8, q8, zero), 0, &in[8]);
+  // zigzag-scan the levels into out[].
+  {
+    const i16x8 z0 = (i16x8)vec_perm((u8x16)out0, (u8x16)out8, kZigzagLo);
+    const i16x8 z8 = (i16x8)vec_perm((u8x16)out0, (u8x16)out8, kZigzagHi);
+    vec_xst(z0, 0, &out[0]);
+    vec_xst(z8, 0, &out[8]);
+    return !vec_all_eq(vec_packs(z0, z8), vec_splats((signed char)0));
+  }
+}
+
+static int QuantizeBlock_VSX(int16_t in[16], int16_t out[16],
+                             const VP8Matrix* WEBP_RESTRICT const mtx) {
+  return DoQuantizeBlock_VSX(in, out, &mtx->sharpen[0], mtx);
+}
+
+static int QuantizeBlockWHT_VSX(int16_t in[16], int16_t out[16],
+                                const VP8Matrix* WEBP_RESTRICT const mtx) {
+  return DoQuantizeBlock_VSX(in, out, NULL, mtx);
+}
+
+static int Quantize2Blocks_VSX(int16_t in[32], int16_t out[32],
+                               const VP8Matrix* WEBP_RESTRICT const mtx) {
+  int nz;
+  const uint16_t* const sharpen = &mtx->sharpen[0];
+  nz = DoQuantizeBlock_VSX(in + 0 * 16, out + 0 * 16, sharpen, mtx) << 0;
+  nz |= DoQuantizeBlock_VSX(in + 1 * 16, out + 1 * 16, sharpen, mtx) << 1;
+  return nz;
+}
+
+//------------------------------------------------------------------------------
 
 extern void VP8EncDspInitVSX(void);
 
 WEBP_TSAN_IGNORE_FUNCTION void VP8EncDspInitVSX(void) {
   VP8ITransform = ITransform_VSX;
+  VP8EncQuantizeBlock = QuantizeBlock_VSX;
+  VP8EncQuantize2Blocks = Quantize2Blocks_VSX;
+  VP8EncQuantizeBlockWHT = QuantizeBlockWHT_VSX;
   VP8TDisto4x4 = Disto4x4_VSX;
   VP8TDisto16x16 = Disto16x16_VSX;
   VP8CollectHistogram = CollectHistogram_VSX;
