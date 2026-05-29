@@ -58,71 +58,73 @@ static void Upsample32Pixels(const uint8_t* WEBP_RESTRICT r1,
   vec_xst(vec_mergel(tc, td), 0, out + 80);
 }
 
-#define UPSAMPLE_FUNC(FUNC_NAME, FUNC, FUNC32)                                \
-  static void FUNC_NAME(                                                      \
-      const uint8_t* WEBP_RESTRICT top_y,                                     \
-      const uint8_t* WEBP_RESTRICT bottom_y,                                  \
-      const uint8_t* WEBP_RESTRICT top_u, const uint8_t* WEBP_RESTRICT top_v, \
-      const uint8_t* WEBP_RESTRICT cur_u, const uint8_t* WEBP_RESTRICT cur_v, \
-      uint8_t* WEBP_RESTRICT top_dst, uint8_t* WEBP_RESTRICT bottom_dst,      \
-      int len) {                                                              \
-    int uv_pos, pos;                                                          \
-    uint8_t uv_buf[14 * 32 + 15] = {0};                                       \
-    uint8_t* const r_u =                                                      \
-        (uint8_t*)(((uintptr_t)(uv_buf + 15)) & ~(uintptr_t)15);              \
-    uint8_t* const r_v = r_u + 32;                                            \
-    assert(top_y != NULL);                                                    \
-    {                                                                         \
-      const int u_diag = ((top_u[0] + cur_u[0]) >> 1) + 1;                    \
-      const int v_diag = ((top_v[0] + cur_v[0]) >> 1) + 1;                    \
-      FUNC(top_y[0], (top_u[0] + u_diag) >> 1, (top_v[0] + v_diag) >> 1,      \
-           top_dst);                                                          \
-      if (bottom_y != NULL) {                                                 \
-        FUNC(bottom_y[0], (cur_u[0] + u_diag) >> 1, (cur_v[0] + v_diag) >> 1, \
-             bottom_dst);                                                     \
-      }                                                                       \
-    }                                                                         \
-    for (pos = 1, uv_pos = 0; pos + 32 + 1 <= len; pos += 32, uv_pos += 16) { \
-      Upsample32Pixels(top_u + uv_pos, cur_u + uv_pos, r_u);                  \
-      Upsample32Pixels(top_v + uv_pos, cur_v + uv_pos, r_v);                  \
-      FUNC32(top_y + pos, r_u, r_v, top_dst + pos * 4);                       \
-      if (bottom_y != NULL) {                                                 \
-        FUNC32(bottom_y + pos, r_u + 64, r_v + 64, bottom_dst + pos * 4);     \
-      }                                                                       \
-    }                                                                         \
-    if (len > 1) {                                                            \
-      const int left_over = ((len + 1) >> 1) - (pos >> 1);                    \
-      uint8_t* const tmp_top_dst = r_u + 4 * 32;                              \
-      uint8_t* const tmp_bottom_dst = tmp_top_dst + 4 * 32;                   \
-      uint8_t* const tmp_top = tmp_bottom_dst + 4 * 32;                       \
-      uint8_t* const tmp_bottom = (bottom_y == NULL) ? NULL : tmp_top + 32;   \
-      uint8_t r1[17], r2[17];                                                 \
-      assert(left_over > 0);                                                  \
-      memcpy(r1, top_u + uv_pos, left_over);                                  \
-      memcpy(r2, cur_u + uv_pos, left_over);                                  \
-      memset(r1 + left_over, r1[left_over - 1], 17 - left_over);              \
-      memset(r2 + left_over, r2[left_over - 1], 17 - left_over);              \
-      Upsample32Pixels(r1, r2, r_u);                                          \
-      memcpy(r1, top_v + uv_pos, left_over);                                  \
-      memcpy(r2, cur_v + uv_pos, left_over);                                  \
-      memset(r1 + left_over, r1[left_over - 1], 17 - left_over);              \
-      memset(r2 + left_over, r2[left_over - 1], 17 - left_over);              \
-      Upsample32Pixels(r1, r2, r_v);                                          \
-      memcpy(tmp_top, top_y + pos, len - pos);                                \
-      if (bottom_y != NULL) memcpy(tmp_bottom, bottom_y + pos, len - pos);    \
-      FUNC32(tmp_top, r_u, r_v, tmp_top_dst);                                 \
-      if (bottom_y != NULL)                                                   \
-        FUNC32(tmp_bottom, r_u + 64, r_v + 64, tmp_bottom_dst);               \
-      memcpy(top_dst + pos * 4, tmp_top_dst, (len - pos) * 4);                \
-      if (bottom_y != NULL) {                                                 \
-        memcpy(bottom_dst + pos * 4, tmp_bottom_dst, (len - pos) * 4);        \
-      }                                                                       \
-    }                                                                         \
+#define UPSAMPLE_FUNC(FUNC_NAME, FUNC, FUNC32, XSTEP)                          \
+  static void FUNC_NAME(                                                       \
+      const uint8_t* WEBP_RESTRICT top_y,                                      \
+      const uint8_t* WEBP_RESTRICT bottom_y,                                   \
+      const uint8_t* WEBP_RESTRICT top_u, const uint8_t* WEBP_RESTRICT top_v,  \
+      const uint8_t* WEBP_RESTRICT cur_u, const uint8_t* WEBP_RESTRICT cur_v,  \
+      uint8_t* WEBP_RESTRICT top_dst, uint8_t* WEBP_RESTRICT bottom_dst,       \
+      int len) {                                                               \
+    int uv_pos, pos;                                                           \
+    uint8_t uv_buf[14 * 32 + 15] = {0};                                        \
+    uint8_t* const r_u =                                                       \
+        (uint8_t*)(((uintptr_t)(uv_buf + 15)) & ~(uintptr_t)15);               \
+    uint8_t* const r_v = r_u + 32;                                             \
+    assert(top_y != NULL);                                                     \
+    {                                                                          \
+      const int u_diag = ((top_u[0] + cur_u[0]) >> 1) + 1;                     \
+      const int v_diag = ((top_v[0] + cur_v[0]) >> 1) + 1;                     \
+      FUNC(top_y[0], (top_u[0] + u_diag) >> 1, (top_v[0] + v_diag) >> 1,       \
+           top_dst);                                                           \
+      if (bottom_y != NULL) {                                                  \
+        FUNC(bottom_y[0], (cur_u[0] + u_diag) >> 1, (cur_v[0] + v_diag) >> 1,  \
+             bottom_dst);                                                      \
+      }                                                                        \
+    }                                                                          \
+    for (pos = 1, uv_pos = 0; pos + 32 + 1 <= len; pos += 32, uv_pos += 16) {  \
+      Upsample32Pixels(top_u + uv_pos, cur_u + uv_pos, r_u);                   \
+      Upsample32Pixels(top_v + uv_pos, cur_v + uv_pos, r_v);                   \
+      FUNC32(top_y + pos, r_u, r_v, top_dst + pos * XSTEP);                    \
+      if (bottom_y != NULL) {                                                  \
+        FUNC32(bottom_y + pos, r_u + 64, r_v + 64, bottom_dst + pos * XSTEP);  \
+      }                                                                        \
+    }                                                                          \
+    if (len > 1) {                                                             \
+      const int left_over = ((len + 1) >> 1) - (pos >> 1);                     \
+      uint8_t* const tmp_top_dst = r_u + 4 * 32;                               \
+      uint8_t* const tmp_bottom_dst = tmp_top_dst + 4 * 32;                    \
+      uint8_t* const tmp_top = tmp_bottom_dst + 4 * 32;                        \
+      uint8_t* const tmp_bottom = (bottom_y == NULL) ? NULL : tmp_top + 32;    \
+      uint8_t r1[17], r2[17];                                                  \
+      assert(left_over > 0);                                                   \
+      memcpy(r1, top_u + uv_pos, left_over);                                   \
+      memcpy(r2, cur_u + uv_pos, left_over);                                   \
+      memset(r1 + left_over, r1[left_over - 1], 17 - left_over);               \
+      memset(r2 + left_over, r2[left_over - 1], 17 - left_over);               \
+      Upsample32Pixels(r1, r2, r_u);                                           \
+      memcpy(r1, top_v + uv_pos, left_over);                                   \
+      memcpy(r2, cur_v + uv_pos, left_over);                                   \
+      memset(r1 + left_over, r1[left_over - 1], 17 - left_over);               \
+      memset(r2 + left_over, r2[left_over - 1], 17 - left_over);               \
+      Upsample32Pixels(r1, r2, r_v);                                           \
+      memcpy(tmp_top, top_y + pos, len - pos);                                 \
+      if (bottom_y != NULL) memcpy(tmp_bottom, bottom_y + pos, len - pos);     \
+      FUNC32(tmp_top, r_u, r_v, tmp_top_dst);                                  \
+      if (bottom_y != NULL)                                                    \
+        FUNC32(tmp_bottom, r_u + 64, r_v + 64, tmp_bottom_dst);                \
+      memcpy(top_dst + pos * XSTEP, tmp_top_dst, (len - pos) * XSTEP);         \
+      if (bottom_y != NULL) {                                                  \
+        memcpy(bottom_dst + pos * XSTEP, tmp_bottom_dst, (len - pos) * XSTEP); \
+      }                                                                        \
+    }                                                                          \
   }
 
-UPSAMPLE_FUNC(UpsampleRgbaLinePair_VSX, VP8YuvToRgba, VP8YuvToRgba32_VSX)
-UPSAMPLE_FUNC(UpsampleBgraLinePair_VSX, VP8YuvToBgra, VP8YuvToBgra32_VSX)
-UPSAMPLE_FUNC(UpsampleArgbLinePair_VSX, VP8YuvToArgb, VP8YuvToArgb32_VSX)
+UPSAMPLE_FUNC(UpsampleRgbaLinePair_VSX, VP8YuvToRgba, VP8YuvToRgba32_VSX, 4)
+UPSAMPLE_FUNC(UpsampleBgraLinePair_VSX, VP8YuvToBgra, VP8YuvToBgra32_VSX, 4)
+UPSAMPLE_FUNC(UpsampleArgbLinePair_VSX, VP8YuvToArgb, VP8YuvToArgb32_VSX, 4)
+UPSAMPLE_FUNC(UpsampleRgbLinePair_VSX, VP8YuvToRgb, VP8YuvToRgb32_VSX, 3)
+UPSAMPLE_FUNC(UpsampleBgrLinePair_VSX, VP8YuvToBgr, VP8YuvToBgr32_VSX, 3)
 
 extern WebPUpsampleLinePairFunc WebPUpsamplers[/* MODE_LAST */];
 
@@ -133,6 +135,8 @@ WEBP_TSAN_IGNORE_FUNCTION void WebPInitUpsamplersVSX(void) {
   WebPUpsamplers[MODE_BGRA] = UpsampleBgraLinePair_VSX;
   WebPUpsamplers[MODE_rgbA] = UpsampleRgbaLinePair_VSX;
   WebPUpsamplers[MODE_bgrA] = UpsampleBgraLinePair_VSX;
+  WebPUpsamplers[MODE_RGB] = UpsampleRgbLinePair_VSX;
+  WebPUpsamplers[MODE_BGR] = UpsampleBgrLinePair_VSX;
 #if !defined(WEBP_REDUCE_CSP)
   WebPUpsamplers[MODE_ARGB] = UpsampleArgbLinePair_VSX;
   WebPUpsamplers[MODE_Argb] = UpsampleArgbLinePair_VSX;

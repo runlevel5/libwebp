@@ -226,6 +226,14 @@ void VP8YuvToArgb32_VSX(const uint8_t* WEBP_RESTRICT y,
                         const uint8_t* WEBP_RESTRICT u,
                         const uint8_t* WEBP_RESTRICT v,
                         uint8_t* WEBP_RESTRICT dst);
+void VP8YuvToRgb32_VSX(const uint8_t* WEBP_RESTRICT y,
+                       const uint8_t* WEBP_RESTRICT u,
+                       const uint8_t* WEBP_RESTRICT v,
+                       uint8_t* WEBP_RESTRICT dst);
+void VP8YuvToBgr32_VSX(const uint8_t* WEBP_RESTRICT y,
+                       const uint8_t* WEBP_RESTRICT u,
+                       const uint8_t* WEBP_RESTRICT v,
+                       uint8_t* WEBP_RESTRICT dst);
 
 #endif  // WEBP_USE_VSX
 
