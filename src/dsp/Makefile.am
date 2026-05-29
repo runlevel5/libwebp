@@ -129,6 +129,7 @@ libwebpdspdecode_vsx_la_CFLAGS = $(AM_CFLAGS) $(VSX_FLAGS)
 
 libwebpdsp_vsx_la_SOURCES =
 libwebpdsp_vsx_la_SOURCES += cost_vsx.c
+libwebpdsp_vsx_la_SOURCES += enc_vsx.c
 libwebpdsp_vsx_la_SOURCES += lossless_enc_vsx.c
 libwebpdsp_vsx_la_SOURCES += ssim_vsx.c
 libwebpdsp_vsx_la_CPPFLAGS = $(libwebpdsp_la_CPPFLAGS)

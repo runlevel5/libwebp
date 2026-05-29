@@ -769,6 +769,7 @@ extern void VP8EncDspInitNEON(void);
 extern void VP8EncDspInitMIPS32(void);
 extern void VP8EncDspInitMIPSdspR2(void);
 extern void VP8EncDspInitMSA(void);
+extern void VP8EncDspInitVSX(void);
 
 WEBP_DSP_INIT_FUNC(VP8EncDspInit) {
   VP8DspInit();  // common inverse transforms
@@ -832,6 +833,11 @@ WEBP_DSP_INIT_FUNC(VP8EncDspInit) {
 #if defined(WEBP_USE_MSA)
     if (VP8GetCPUInfo(kMSA)) {
       VP8EncDspInitMSA();
+    }
+#endif
+#if defined(WEBP_HAVE_VSX)
+    if (VP8GetCPUInfo(kVSX)) {
+      VP8EncDspInitVSX();
     }
 #endif
   }
