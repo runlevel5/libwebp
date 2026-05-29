@@ -229,6 +229,77 @@ void VP8YuvToArgb32_VSX(const uint8_t* WEBP_RESTRICT y,
   }
 }
 
+// Pack R/G/B/A into 16-bit rgba4444 (8 pixels -> 16 bytes).
+static WEBP_INLINE void PackAndStore4444(i16x8 R, i16x8 G, u16x8 B, i16x8 A,
+                                         uint8_t* WEBP_RESTRICT dst) {
+  const u8x16 mask = vec_splats((unsigned char)0xf0);
+  const u16x8 four = vec_splats((unsigned short)4);
+#if (WEBP_SWAP_16BIT_CSP == 0)
+  const u8x16 rg0 = vec_packsu(R, G);
+  const u8x16 ba0 = vec_packsu((i16x8)B, A);
+#else
+  const u8x16 rg0 = vec_packsu((i16x8)B, A);
+  const u8x16 ba0 = vec_packsu(R, G);
+#endif
+  const u8x16 rb1 = vec_mergeh(rg0, ba0);
+  const u8x16 ga1 = vec_mergel(rg0, ba0);
+  const u8x16 rb2 = vec_and(rb1, mask);
+  const u8x16 ga2 = (u8x16)vec_sr((u16x8)vec_and(ga1, mask), four);
+  vec_xst(vec_or(rb2, ga2), 0, dst);
+}
+
+// Pack R/G/B into 16-bit rgb565 (8 pixels -> 16 bytes).
+static WEBP_INLINE void PackAndStore565(i16x8 R, i16x8 G, u16x8 B,
+                                        uint8_t* WEBP_RESTRICT dst) {
+  const u16x8 three = vec_splats((unsigned short)3);
+  const u16x8 five = vec_splats((unsigned short)5);
+  const u8x16 r0 = vec_packsu(R, R);
+  const u8x16 g0 = vec_packsu(G, G);
+  const u8x16 b0 = vec_packsu((i16x8)B, (i16x8)B);
+  const u8x16 r1 = vec_and(r0, vec_splats((unsigned char)0xf8));
+  const u8x16 b1 =
+      vec_and((u8x16)vec_sr((u16x8)b0, three), vec_splats((unsigned char)0x1f));
+  const u8x16 g1 =
+      (u8x16)vec_sr((u16x8)vec_and(g0, vec_splats((unsigned char)0xe0)), five);
+  const u8x16 g2 =
+      (u8x16)vec_sl((u16x8)vec_and(g0, vec_splats((unsigned char)0x1c)), three);
+  const u8x16 rg = vec_or(r1, g1);
+  const u8x16 gb = vec_or(g2, b1);
+#if (WEBP_SWAP_16BIT_CSP == 0)
+  vec_xst(vec_mergeh(rg, gb), 0, dst);
+#else
+  vec_xst(vec_mergeh(gb, rg), 0, dst);
+#endif
+}
+
+void VP8YuvToRgba444432_VSX(const uint8_t* WEBP_RESTRICT y,
+                            const uint8_t* WEBP_RESTRICT u,
+                            const uint8_t* WEBP_RESTRICT v,
+                            uint8_t* WEBP_RESTRICT dst) {
+  int n;
+  for (n = 0; n < 32; n += 8, dst += 16) {
+    i16x8 R, G;
+    u16x8 B;
+    ConvertYUV444ToRGB(LoadHi16(y + n), LoadHi16(u + n), LoadHi16(v + n), &R,
+                       &G, &B);
+    PackAndStore4444(R, G, B, kAlpha, dst);
+  }
+}
+
+void VP8YuvToRgb56532_VSX(const uint8_t* WEBP_RESTRICT y,
+                          const uint8_t* WEBP_RESTRICT u,
+                          const uint8_t* WEBP_RESTRICT v,
+                          uint8_t* WEBP_RESTRICT dst) {
+  int n;
+  for (n = 0; n < 32; n += 8, dst += 16) {
+    i16x8 R, G;
+    u16x8 B;
+    ConvertYUV444ToRGB(LoadHi16(y + n), LoadHi16(u + n), LoadHi16(v + n), &R,
+                       &G, &B);
+    PackAndStore565(R, G, B, dst);
+  }
+}
+
 void VP8YuvToRgb32_VSX(const uint8_t* WEBP_RESTRICT y,
                        const uint8_t* WEBP_RESTRICT u,
                        const uint8_t* WEBP_RESTRICT v,
