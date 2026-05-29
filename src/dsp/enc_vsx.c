@@ -16,6 +16,7 @@
 #if defined(WEBP_USE_VSX)
 
 #include <altivec.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "src/dsp/cpu.h"
@@ -422,11 +423,126 @@ static void FTransformWHT_VSX(const int16_t* WEBP_RESTRICT in,
 }
 
 //------------------------------------------------------------------------------
+// Texture distortion (Hadamard transform).
+
+// Combines 4 bytes of inA and 4 bytes of inB into [a0..a3 b0..b3] (16-bit).
+static WEBP_INLINE i16x8 LoadCombine_VSX(const uint8_t* a, const uint8_t* b) {
+  const u8x16 zero = vec_splats((unsigned char)0);
+  const u8x16 ab =
+      (u8x16)vec_mergeh((u32x4)Load64_VSX(a), (u32x4)Load64_VSX(b));
+  return (i16x8)vec_mergeh(ab, zero);
+}
+
+static int TTransform_VSX(const uint8_t* WEBP_RESTRICT inA,
+                          const uint8_t* WEBP_RESTRICT inB,
+                          const uint16_t* WEBP_RESTRICT const w) {
+  const i16x8 zero = vec_splats((short)0);
+  const i32x4 z32 = (i32x4)vec_splats(0);
+  i16x8 tmp0 = LoadCombine_VSX(&inA[BPS * 0], &inB[BPS * 0]);
+  i16x8 tmp1 = LoadCombine_VSX(&inA[BPS * 1], &inB[BPS * 1]);
+  i16x8 tmp2 = LoadCombine_VSX(&inA[BPS * 2], &inB[BPS * 2]);
+  i16x8 tmp3 = LoadCombine_VSX(&inA[BPS * 3], &inB[BPS * 3]);
+
+  {  // Vertical pass and transpose.
+    const i16x8 a0 = vec_add(tmp0, tmp2);
+    const i16x8 a1 = vec_add(tmp1, tmp3);
+    const i16x8 a2 = vec_sub(tmp1, tmp3);
+    const i16x8 a3 = vec_sub(tmp0, tmp2);
+    Transpose2_4x4(vec_add(a0, a1), vec_add(a3, a2), vec_sub(a3, a2),
+                   vec_sub(a0, a1), &tmp0, &tmp1, &tmp2, &tmp3);
+  }
+  {  // Horizontal pass and difference of weighted sums.
+    const i16x8 w0 = (i16x8)vec_xl(0, (uint16_t*)&w[0]);
+    const i16x8 w8 = (i16x8)vec_xl(0, (uint16_t*)&w[8]);
+    const i16x8 a0 = vec_add(tmp0, tmp2);
+    const i16x8 a1 = vec_add(tmp1, tmp3);
+    const i16x8 a2 = vec_sub(tmp1, tmp3);
+    const i16x8 a3 = vec_sub(tmp0, tmp2);
+    const i16x8 b0 = vec_add(a0, a1);
+    const i16x8 b1 = vec_add(a3, a2);
+    const i16x8 b2 = vec_sub(a3, a2);
+    const i16x8 b3 = vec_sub(a0, a1);
+    // Separate the transforms of inA (low 64b) and inB (high 64b).
+    i16x8 A_b0 = (i16x8)vec_mergeh((i64x2)b0, (i64x2)b1);
+    i16x8 A_b2 = (i16x8)vec_mergeh((i64x2)b2, (i64x2)b3);
+    i16x8 B_b0 = (i16x8)vec_mergel((i64x2)b0, (i64x2)b1);
+    i16x8 B_b2 = (i16x8)vec_mergel((i64x2)b2, (i64x2)b3);
+    A_b0 = vec_max(A_b0, vec_sub(zero, A_b0));  // abs
+    A_b2 = vec_max(A_b2, vec_sub(zero, A_b2));
+    B_b0 = vec_max(B_b0, vec_sub(zero, B_b0));
+    B_b2 = vec_max(B_b2, vec_sub(zero, B_b2));
+    {
+      const i32x4 sA =
+          vec_add(vec_msum(A_b0, w0, z32), vec_msum(A_b2, w8, z32));
+      const i32x4 sB =
+          vec_add(vec_msum(B_b0, w0, z32), vec_msum(B_b2, w8, z32));
+      return HorizontalSumS32_VSX(vec_sub(sA, sB));
+    }
+  }
+}
+
+static int Disto4x4_VSX(const uint8_t* WEBP_RESTRICT const a,
+                        const uint8_t* WEBP_RESTRICT const b,
+                        const uint16_t* WEBP_RESTRICT const w) {
+  const int diff_sum = TTransform_VSX(a, b, w);
+  return abs(diff_sum) >> 5;
+}
+
+static int Disto16x16_VSX(const uint8_t* WEBP_RESTRICT const a,
+                          const uint8_t* WEBP_RESTRICT const b,
+                          const uint16_t* WEBP_RESTRICT const w) {
+  int D = 0;
+  int x, y;
+  for (y = 0; y < 16 * BPS; y += 4 * BPS) {
+    for (x = 0; x < 16; x += 4) {
+      D += Disto4x4_VSX(a + x + y, b + x + y, w);
+    }
+  }
+  return D;
+}
+
+//------------------------------------------------------------------------------
+// Histogram collection.
+
+static void CollectHistogram_VSX(const uint8_t* WEBP_RESTRICT ref,
+                                 const uint8_t* WEBP_RESTRICT pred,
+                                 int start_block, int end_block,
+                                 VP8Histogram* WEBP_RESTRICT const histo) {
+  const i16x8 zero = vec_splats((short)0);
+  const i16x8 max_coeff_thresh = vec_splats((short)MAX_COEFF_THRESH);
+  const u16x8 three = vec_splats((unsigned short)3);
+  int j;
+  int distribution[MAX_COEFF_THRESH + 1] = {0};
+  for (j = start_block; j < end_block; ++j) {
+    int16_t out[16];
+    int k;
+    FTransform_One_VSX(ref + VP8DspScan[j], pred + VP8DspScan[j], out);
+    {
+      const i16x8 out0 = (i16x8)vec_xl(0, (int16_t*)&out[0]);
+      const i16x8 out1 = (i16x8)vec_xl(0, (int16_t*)&out[8]);
+      const i16x8 abs0 = vec_max(out0, vec_sub(zero, out0));
+      const i16x8 abs1 = vec_max(out1, vec_sub(zero, out1));
+      const i16x8 v0 = vec_sra(abs0, three);
+      const i16x8 v1 = vec_sra(abs1, three);
+      vec_xst(vec_min(v0, max_coeff_thresh), 0, &out[0]);
+      vec_xst(vec_min(v1, max_coeff_thresh), 0, &out[8]);
+    }
+    for (k = 0; k < 16; ++k) {
+      ++distribution[out[k]];
+    }
+  }
+  VP8SetHistogramData(distribution, histo);
+}
+
+//------------------------------------------------------------------------------
 
 extern void VP8EncDspInitVSX(void);
 
 WEBP_TSAN_IGNORE_FUNCTION void VP8EncDspInitVSX(void) {
   VP8ITransform = ITransform_VSX;
+  VP8TDisto4x4 = Disto4x4_VSX;
+  VP8TDisto16x16 = Disto16x16_VSX;
+  VP8CollectHistogram = CollectHistogram_VSX;
   VP8FTransform = FTransform_VSX;
   VP8FTransform2 = FTransform2_VSX;
   VP8FTransformWHT = FTransformWHT_VSX;
