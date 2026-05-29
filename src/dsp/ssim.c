@@ -139,6 +139,7 @@ VP8AccumulateSSEFunc VP8AccumulateSSE;
 
 extern VP8CPUInfo VP8GetCPUInfo;
 extern void VP8SSIMDspInitSSE2(void);
+extern void VP8SSIMDspInitVSX(void);
 
 WEBP_DSP_INIT_FUNC(VP8SSIMDspInit) {
 #if !defined(WEBP_REDUCE_SIZE)
@@ -154,6 +155,11 @@ WEBP_DSP_INIT_FUNC(VP8SSIMDspInit) {
 #if defined(WEBP_HAVE_SSE2)
     if (VP8GetCPUInfo(kSSE2)) {
       VP8SSIMDspInitSSE2();
+    }
+#endif
+#if defined(WEBP_HAVE_VSX)
+    if (VP8GetCPUInfo(kVSX)) {
+      VP8SSIMDspInitVSX();
     }
 #endif
   }
