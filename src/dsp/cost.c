@@ -295,6 +295,7 @@ extern void VP8EncDspCostInitMIPS32(void);
 extern void VP8EncDspCostInitMIPSdspR2(void);
 extern void VP8EncDspCostInitSSE2(void);
 extern void VP8EncDspCostInitNEON(void);
+extern void VP8EncDspCostInitVSX(void);
 
 WEBP_DSP_INIT_FUNC(VP8EncDspCostInit) {
   VP8GetResidualCost = GetResidualCost_C;
@@ -320,6 +321,11 @@ WEBP_DSP_INIT_FUNC(VP8EncDspCostInit) {
 #if defined(WEBP_HAVE_NEON)
     if (VP8GetCPUInfo(kNEON)) {
       VP8EncDspCostInitNEON();
+    }
+#endif
+#if defined(WEBP_HAVE_VSX)
+    if (VP8GetCPUInfo(kVSX)) {
+      VP8EncDspCostInitVSX();
     }
 #endif
   }
